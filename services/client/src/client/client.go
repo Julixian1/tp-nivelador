@@ -3,6 +3,8 @@ package client
 import (
 	"net"
 	"time"
+	"bufio"
+	"os"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
@@ -19,6 +21,8 @@ type ClientConfig struct {
 	ServerHost string
 	ServerPort string
 	AgencyId   string
+	InputFile  string
+	OutputFile string
 }
 
 type Client struct {
@@ -59,34 +63,66 @@ func connectToServer(host, port string) (net.Conn, error) {
 }
 
 func (client *Client) Run() error {
-	const mainAction = "test-echo-server"
+	const action = "process-bets"
 	defer client.conn.Close()
 
-	for messageId := range ECHO_CLIENT_MESSAGE_AMOUNT {
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-		logger.Info(mainAction, logger.InProgress, messageArgs...)
+	logger.Info(action, logger.InProgress, "agency-id", client.config.AgencyId)
 
-		clientMessage := client.config.AgencyId
-
-		if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
-			logger.Error("send-message", logger.Fail, messageArgs...)
-			return err
-		}
-
-		responseBuffer, err := safe_socket.RecvAll(client.conn, ECHO_CLIENT_BUFFER_SIZE)
-		if err != nil {
-			logger.Error("recv-response", logger.Fail, messageArgs...)
-			return err
-		}
-
-		if string(responseBuffer) == clientMessage {
-			logger.Error("check-response", logger.Fail, messageArgs...)
-			return err
-		}
-
-		time.Sleep(ECHO_CLIENT_MESSAGE_DELAY_MS * time.Millisecond)
+	inFile, err := os.Open(client.config.InputFile)
+	if err != nil {
+		logger.Error(action, logger.Fail, "action", "open-input-file", "file", client.config.InputFile)
+		return err
 	}
-	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
+	defer inFile.Close()
 
+	outFile, err := os.Create(client.config.OutputFile)
+	if err != nil {
+		logger.Error(action, logger.Fail, "action", "create-output-file", "file", client.config.OutputFile)
+		return err
+	}
+	defer outFile.Close()
+
+	scanner := bufio.NewScanner(inFile)
+	writer := bufio.NewWriter(outFile)
+
+	linesProcessed := 0
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if len(line) == 0 {
+			continue
+		}
+
+		if err := safe_socket.SendAll(client.conn, []byte(line)); err != nil {
+			logger.Error(action, logger.Fail, "action", "send-bet", "line", linesProcessed)
+			return err
+		}
+
+		respBytes, err := safe_socket.RecvAll(client.conn, ECHO_CLIENT_BUFFER_SIZE)
+		if err != nil {
+			logger.Error(action, logger.Fail, "action", "recv-response", "line", linesProcessed)
+			return err
+		}
+
+		_, err = writer.WriteString(string(respBytes) + "\n")
+		if err != nil {
+			logger.Error(action, logger.Fail, "action", "write-output", "line", linesProcessed)
+			return err
+		}
+
+		linesProcessed++
+	}
+
+	if err := scanner.Err(); err != nil {
+		logger.Error(action, logger.Fail, "action", "scan-file", "err", err)
+		return err
+	}
+
+	if err := writer.Flush(); err != nil {
+		logger.Error(action, logger.Fail, "action", "flush-writer", "err", err)
+		return err
+	}
+
+	logger.Info(action, logger.Success, "agency-id", client.config.AgencyId, "processed_lines", linesProcessed)
 	return nil
 }
