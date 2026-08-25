@@ -4,6 +4,7 @@ import (
 	"net"
 	"time"
 	"bufio"
+	"bytes"
 	"os"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
@@ -13,7 +14,7 @@ import (
 const CONNECTION_ATTEMPTS_MAX = 3
 const CONNECTION_ATTEMPS_DELAY_MS = 200
 
-const ECHO_CLIENT_BUFFER_SIZE = 512
+const ECHO_CLIENT_BUFFER_SIZE = 1024
 const ECHO_CLIENT_MESSAGE_AMOUNT = 3
 const ECHO_CLIENT_MESSAGE_DELAY_MS = 1000
 
@@ -92,8 +93,10 @@ func (client *Client) Run() error {
 		if len(line) == 0 {
 			continue
 		}
+		buffer := make([]byte, ECHO_CLIENT_BUFFER_SIZE)
+		copy(buffer, []byte(line))
 
-		if err := safe_socket.SendAll(client.conn, []byte(line)); err != nil {
+		if err := safe_socket.SendAll(client.conn, buffer); err != nil {
 			logger.Error(action, logger.Fail, "action", "send-bet", "line", linesProcessed)
 			return err
 		}
@@ -104,7 +107,9 @@ func (client *Client) Run() error {
 			return err
 		}
 
-		_, err = writer.WriteString(string(respBytes) + "\n")
+		cleanedResp := bytes.TrimRight(respBytes, "\x00\r\n")
+
+		_, err = writer.WriteString(string(cleanedResp) + "\n")
 		if err != nil {
 			logger.Error(action, logger.Fail, "action", "write-output", "line", linesProcessed)
 			return err
