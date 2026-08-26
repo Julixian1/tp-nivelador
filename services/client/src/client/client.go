@@ -4,6 +4,7 @@ import (
 	"net"
 	"time"
 	"bufio"
+	"bytes"
 	"os"
 	"encoding/binary"
 
@@ -26,6 +27,7 @@ type ClientConfig struct {
 	AgencyId   string
 	InputFile  string
 	OutputFile string
+	BatchSize  int
 }
 
 type Client struct {
@@ -76,6 +78,20 @@ func createPacket(msgType byte, payload []byte) []byte {
 	return packet
 }
 
+func sendBatch(conn net.Conn, batch [][]byte) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	payload := bytes.Join(batch, []byte("\n"))
+	packet := createPacket(MsgTypeBet, payload)
+
+	if err := safe_socket.SendAll(conn, packet); err != nil {
+		logger.Error("process-bets", logger.Fail, "action", "send-bet-batch")
+		return err
+	}
+	return nil
+}
+
 func (client *Client) Run() error {
 	const action = "process-bets"
 	defer client.conn.Close()
@@ -91,6 +107,7 @@ func (client *Client) Run() error {
 
 	scanner := bufio.NewScanner(inFile)
 	linesProcessed := 0
+	var batch [][]byte 
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -98,11 +115,15 @@ func (client *Client) Run() error {
 			continue
 		}
 		betData := client.config.AgencyId + "," + line
-		packet := createPacket(MsgTypeBet, []byte(betData))
-		if err := safe_socket.SendAll(client.conn, packet); err != nil {
-			logger.Error(action, logger.Fail, "action", "send-bet", "line", linesProcessed)
-			return err
+		batch = append(batch, []byte(betData))
+
+		if len(batch)>=client.config.BatchSize{
+			if err := sendBatch(client.conn, batch); err != nil {
+				return err
+			}
+			batch = batch[:0]
 		}
+		
 		linesProcessed++
 	}
 
@@ -110,6 +131,11 @@ func (client *Client) Run() error {
 		logger.Error(action, logger.Fail, "action", "scan-file", "err", err)
 		return err
 	}
+	
+	if err := sendBatch(client.conn, batch); err != nil {
+        return err
+    }
+    batch = batch[:0]
 
 	endPacket := createPacket(MsgTypeEnd, []byte{})
 	if err := safe_socket.SendAll(client.conn, endPacket); err != nil {

@@ -34,21 +34,27 @@ class Server:
                     payload = safe_socket.recv_all(client_socket, payload_len)
 
                 if msg_type == MSG_TYPE_BET:
-                    line = payload.decode("utf-8")
-                    parts = line.split(",")
-                    current_agency_id = int(parts[0])
+                    lines = payload.decode("utf-8").split("\n")
+                    bets_batch = []
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        parts = line.split(",")
+                        current_agency_id = int(parts[0])
 
-                    bet = Bet(
-                        agency_id=current_agency_id,
-                        first_name=parts[1],
-                        last_name=parts[2],
-                        document=int(parts[3]),
-                        birthdate=parts[4],
-                        number=int(parts[5]),
-                    )
+                        bet = Bet(
+                            agency_id=current_agency_id,
+                            first_name=parts[1],
+                            last_name=parts[2],
+                            document=int(parts[3]),
+                            birthdate=parts[4],
+                            number=int(parts[5]),
+                        )
+                        bets_batch.append(bet)
 
-                    self.lottery.store_bets([bet])
-                    message_amount += 1
+                    if bets_batch:
+                        self.lottery.store_bets(bets_batch)
+                        message_amount += len(bets_batch)
 
                 elif msg_type == MSG_TYPE_END:
                     winners = [
