@@ -4,19 +4,21 @@ import (
 	"net"
 	"time"
 	"bufio"
-	"bytes"
 	"os"
+	"encoding/binary"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
 )
 
-const CONNECTION_ATTEMPTS_MAX = 3
-const CONNECTION_ATTEMPS_DELAY_MS = 200
+const CONNECTION_ATTEMPTS_MAX = 10
+const CONNECTION_ATTEMPS_DELAY_MS = 400
 
-const ECHO_CLIENT_BUFFER_SIZE = 1024
-const ECHO_CLIENT_MESSAGE_AMOUNT = 3
-const ECHO_CLIENT_MESSAGE_DELAY_MS = 1000
+const (
+	MsgTypeBet     byte = 1
+	MsgTypeEnd     byte = 2
+	MsgTypeWinners byte = 3
+)
 
 type ClientConfig struct {
 	ServerHost string
@@ -63,6 +65,17 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
+func createPacket(msgType byte, payload []byte) []byte {
+	length := uint16(len(payload))
+	packet := make([]byte, 2+1+len(payload))
+	
+	binary.BigEndian.PutUint16(packet[0:2], length)
+	packet[2] = msgType
+	copy(packet[3:], payload)
+	
+	return packet
+}
+
 func (client *Client) Run() error {
 	const action = "process-bets"
 	defer client.conn.Close()
@@ -76,16 +89,7 @@ func (client *Client) Run() error {
 	}
 	defer inFile.Close()
 
-	outFile, err := os.Create(client.config.OutputFile)
-	if err != nil {
-		logger.Error(action, logger.Fail, "action", "create-output-file", "file", client.config.OutputFile)
-		return err
-	}
-	defer outFile.Close()
-
 	scanner := bufio.NewScanner(inFile)
-	writer := bufio.NewWriter(outFile)
-
 	linesProcessed := 0
 
 	for scanner.Scan() {
@@ -93,28 +97,12 @@ func (client *Client) Run() error {
 		if len(line) == 0 {
 			continue
 		}
-		buffer := make([]byte, ECHO_CLIENT_BUFFER_SIZE)
-		copy(buffer, []byte(line))
-
-		if err := safe_socket.SendAll(client.conn, buffer); err != nil {
+		betData := client.config.AgencyId + "," + line
+		packet := createPacket(MsgTypeBet, []byte(betData))
+		if err := safe_socket.SendAll(client.conn, packet); err != nil {
 			logger.Error(action, logger.Fail, "action", "send-bet", "line", linesProcessed)
 			return err
 		}
-
-		respBytes, err := safe_socket.RecvAll(client.conn, ECHO_CLIENT_BUFFER_SIZE)
-		if err != nil {
-			logger.Error(action, logger.Fail, "action", "recv-response", "line", linesProcessed)
-			return err
-		}
-
-		cleanedResp := bytes.TrimRight(respBytes, "\x00\r\n")
-
-		_, err = writer.WriteString(string(cleanedResp) + "\n")
-		if err != nil {
-			logger.Error(action, logger.Fail, "action", "write-output", "line", linesProcessed)
-			return err
-		}
-
 		linesProcessed++
 	}
 
@@ -123,8 +111,42 @@ func (client *Client) Run() error {
 		return err
 	}
 
-	if err := writer.Flush(); err != nil {
-		logger.Error(action, logger.Fail, "action", "flush-writer", "err", err)
+	endPacket := createPacket(MsgTypeEnd, []byte{})
+	if err := safe_socket.SendAll(client.conn, endPacket); err != nil {
+		logger.Error(action, logger.Fail, "action", "send-end-bets")
+		return err
+	}
+
+	header, err := safe_socket.RecvAll(client.conn, 3)
+	if err != nil {
+		logger.Error(action, logger.Fail, "action", "recv-winners-header")
+		return err
+	}
+
+	payloadLen := binary.BigEndian.Uint16(header[0:2])
+
+	var winnersPayload []byte
+
+	if payloadLen > 0 {
+		winnersPayload, err = safe_socket.RecvAll(client.conn, int(payloadLen))
+		if err != nil {
+			logger.Error(action, logger.Fail, "action", "recv-winners-body")
+			return err
+		}
+	} else {
+		winnersPayload = []byte{}
+	}
+
+
+	outFile, err := os.Create(client.config.OutputFile)
+	if err != nil {
+		logger.Error(action, logger.Fail, "action", "create-output-file", "file", client.config.OutputFile)
+		return err
+	}
+	defer outFile.Close()
+
+	if _, err := outFile.Write(winnersPayload); err != nil {
+		logger.Error(action, logger.Fail, "action", "write-output")
 		return err
 	}
 
