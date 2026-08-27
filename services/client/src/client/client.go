@@ -131,7 +131,7 @@ func (client *Client) Run() error {
 		logger.Error(action, logger.Fail, "action", "scan-file", "err", err)
 		return err
 	}
-	
+
 	if err := sendBatch(client.conn, batch); err != nil {
         return err
     }
@@ -162,7 +162,6 @@ func (client *Client) Run() error {
 	} else {
 		winnersPayload = []byte{}
 	}
-
 
 	outFile, err := os.Create(client.config.OutputFile)
 	if err != nil {

@@ -1,6 +1,8 @@
 import socket
 import logger
 import safe_socket
+import threading
+import os
 from lottery.lottery import Lottery
 from lottery.bet import Bet
 
@@ -14,6 +16,9 @@ class Server:
         self.server_host = server_host
         self.server_port = server_port
         self.lottery = Lottery(storage_path="bets.csv")
+        self.quorum_min = int(os.getenv("AGENCY_QUORUM_MIN", "6"))
+        self.barrier = threading.Barrier(self.quorum_min)
+        self.storage_lock = threading.Lock()
 
     def _handle_client(self, client_socket):
         action = "handle-client"
@@ -53,15 +58,21 @@ class Server:
                         bets_batch.append(bet)
 
                     if bets_batch:
-                        self.lottery.store_bets(bets_batch)
+                        with self.storage_lock:
+                            self.lottery.store_bets(bets_batch)
                         message_amount += len(bets_batch)
 
                 elif msg_type == MSG_TYPE_END:
-                    winners = [
-                        str(bet.document)
-                        for bet in self.lottery.load_bets()
-                        if bet.agency_id == current_agency_id and self.lottery.has_won(bet)
-                    ]
+                    logger.info("waiting-quorum", logger.LogResult.in_progress)
+                    self.barrier.wait()
+                    logger.info("quorum-reached", logger.LogResult.success)
+
+                    winners = []
+                    with self.storage_lock:
+                        for bet in self.lottery.load_bets():
+                            if bet.agency_id == current_agency_id and self.lottery.has_won(bet):
+                                winner_line = f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
+                                winners.append(winner_line)
 
                     winners_payload = "\n".join(winners).encode("utf-8")
                     if len(winners) > 0:
@@ -99,9 +110,11 @@ class Server:
                 try:
                     logger.info(action, logger.LogResult.in_progress)
                     client_socket, _ = server_socket.accept()
+                    client_thread = threading.Thread(
+                        target=self._handle_client, args=(client_socket,)
+                    )
+                    client_thread.start()
                 except Exception as e:
                     logger.error(action, logger.LogResult.fail)
                     raise e
-                logger.info(action, logger.LogResult.success)
 
-                self._handle_client(client_socket)
