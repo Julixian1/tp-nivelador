@@ -3,6 +3,7 @@ import logger
 import safe_socket
 import threading
 import os
+import signal
 from lottery.lottery import Lottery
 from lottery.bet import Bet
 
@@ -20,13 +21,35 @@ class Server:
         self.barrier = threading.Barrier(self.quorum_min)
         self.storage_lock = threading.Lock()
 
+        self.running = True
+        self.server_socket = None
+        self.client_threads = []
+        signal.signal(signal.SIGTERM, self._sigterm_handler)
+        signal.signal(signal.SIGINT, self._sigterm_handler)
+
+    def _sigterm_handler(self, signum, frame):
+        action = "graceful-shutdown"
+        logger.info(action, logger.LogResult.in_progress, "signal", signum)
+        self.running = False
+
+        try:
+            self.barrier.abort()
+        except Exception:
+            pass
+
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+
     def _handle_client(self, client_socket):
         action = "handle-client"
         message_amount = 0
         current_agency_id = None
         try:
             logger.info(action, logger.LogResult.in_progress)
-            while True:
+            while self.running:
                 header = safe_socket.recv_all(client_socket, 3)
                 if not header:
                     break
@@ -37,6 +60,8 @@ class Server:
                 payload = b""
                 if payload_len > 0:
                     payload = safe_socket.recv_all(client_socket, payload_len)
+                    if payload is None:
+                        break
 
                 if msg_type == MSG_TYPE_BET:
                     lines = payload.decode("utf-8").split("\n")
@@ -64,15 +89,18 @@ class Server:
 
                 elif msg_type == MSG_TYPE_END:
                     logger.info("waiting-quorum", logger.LogResult.in_progress)
-                    self.barrier.wait()
+                    try:
+                        self.barrier.wait()
+                    except threading.BrokenBarrierError:
+                        logger.warn("quorum-wait", logger.LogResult.fail, "reason", "barrier_aborted")
+                        return
                     logger.info("quorum-reached", logger.LogResult.success)
 
                     winners = []
-                    with self.storage_lock:
-                        for bet in self.lottery.load_bets():
-                            if bet.agency_id == current_agency_id and self.lottery.has_won(bet):
-                                winner_line = f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
-                                winners.append(winner_line)
+                    for bet in self.lottery.load_bets():
+                        if bet.agency_id == current_agency_id and self.lottery.has_won(bet):
+                            winner_line = f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
+                            winners.append(winner_line)
 
                     winners_payload = "\n".join(winners).encode("utf-8")
                     if len(winners) > 0:
@@ -94,27 +122,39 @@ class Server:
                     )
                     return
         except Exception as e:
-            logger.error(
-                action, logger.LogResult.fail, "messages-amount", message_amount
-            )
-            raise e
+            if self.running:
+                logger.error(
+                    action, logger.LogResult.fail, "messages-amount", message_amount
+                )
+                raise e
         finally:
             client_socket.close()
 
     def run(self):
         action = "accept-connection"
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-            server_socket.bind((self.server_host, self.server_port))
-            server_socket.listen()
-            while True:
-                try:
-                    logger.info(action, logger.LogResult.in_progress)
-                    client_socket, _ = server_socket.accept()
-                    client_thread = threading.Thread(
-                        target=self._handle_client, args=(client_socket,)
-                    )
-                    client_thread.start()
-                except Exception as e:
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind((self.server_host, self.server_port))
+        self.server_socket.listen()
+
+        while self.running:
+            try:
+                logger.info(action, logger.LogResult.in_progress)
+                client_socket, _ = self.server_socket.accept()
+                client_thread = threading.Thread(
+                    target=self._handle_client, args=(client_socket,)
+                )
+                client_thread.start()
+                self.client_threads.append(client_thread)
+            except OSError:
+                break
+            except Exception as e:
+                if self.running:
                     logger.error(action, logger.LogResult.fail)
                     raise e
 
+        for thread in self.client_threads:
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+                
+        logger.info("graceful-shutdown", logger.LogResult.success)

@@ -10,7 +10,7 @@ def recv_all(socket: socket.socket, size: int):
         if not packet:
             if len(buffer) == 0:
                 return None
-            break
+            raise RuntimeError("Error: La conexión se cortó a la mitad del mensaje")
         buffer.extend(packet)
     return bytes(buffer)
 
@@ -19,6 +19,4 @@ def send_all(socket: socket.socket, data: bytes):
     total_sent = 0
     while total_sent < len(data):
         sent = socket.send(data[total_sent:])
-        if sent == 0:
-            raise RuntimeError("La conexión con el socket se rompió durante la escritura")
         total_sent += sent
