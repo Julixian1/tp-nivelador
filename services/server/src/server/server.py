@@ -10,6 +10,7 @@ from lottery.bet import Bet
 MSG_TYPE_BET = 1
 MSG_TYPE_END = 2
 MSG_TYPE_WINNERS = 3
+MSG_TYPE_ACK = 4
 
 
 class Server:
@@ -86,6 +87,9 @@ class Server:
                         with self.storage_lock:
                             self.lottery.store_bets(bets_batch)
                         message_amount += len(bets_batch)
+
+                    ack_packet = bytes([MSG_TYPE_ACK])
+                    safe_socket.send_all(client_socket, ack_packet)
 
                 elif msg_type == MSG_TYPE_END:
                     logger.info("waiting-quorum", logger.LogResult.in_progress)

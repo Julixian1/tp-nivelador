@@ -4,12 +4,12 @@ import (
 	"net"
 	"time"
 	"bufio"
-	"bytes"
 	"os"
 	"encoding/binary"
 	"os/signal"
 	"syscall"
 	"context"
+	"errors"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
@@ -22,6 +22,7 @@ const (
 	MsgTypeBet     byte = 1
 	MsgTypeEnd     byte = 2
 	MsgTypeWinners byte = 3
+	MsgTypeAck 	   byte = 4
 )
 
 type ClientConfig struct {
@@ -81,26 +82,144 @@ func createPacket(msgType byte, payload []byte) []byte {
 	return packet
 }
 
-func sendBatch(conn net.Conn, batch [][]byte) error {
-	if len(batch) == 0 {
+func (client *Client) sendBatchBuffer(batchBuffer []byte) error {
+	payloadLen := len(batchBuffer) - 3
+	if payloadLen <= 0 {
 		return nil
 	}
-	payload := bytes.Join(batch, []byte("\n"))
-	packet := createPacket(MsgTypeBet, payload)
 
-	if err := safe_socket.SendAll(conn, packet); err != nil {
+	binary.BigEndian.PutUint16(batchBuffer[0:2], uint16(payloadLen))
+	batchBuffer[2] = MsgTypeBet
+
+	if err := safe_socket.SendAll(client.conn, batchBuffer); err != nil {
 		logger.Error("process-bets", logger.Fail, "action", "send-bet-batch")
 		return err
 	}
+
+	ackHeader, err := safe_socket.RecvAll(client.conn, 1)
+	if err != nil {
+		logger.Error("process-bets", logger.Fail, "action", "recv-ack")
+		return err
+	}
+
+	if ackHeader[0] != MsgTypeAck {
+		logger.Error("process-bets", logger.Fail, "action", "invalid-ack-type")
+		return errors.New("invalid ack received")
+	}
+	
 	return nil
 }
 
-func (client *Client) Run() error {
+func (client *Client) sendBetFile(action string) (int, error){
+	inFile, err := os.Open(client.config.InputFile)
+	if err != nil {
+		logger.Error(action, logger.Fail, "action", "open-input-file", "file", client.config.InputFile)
+		return 0, err
+	}
+	defer inFile.Close()
+
+	scanner := bufio.NewScanner(inFile)
+	linesProcessed := 0
+	agencyPrefix := []byte(client.config.AgencyId + ",")
+	batchBuffer := make([]byte, 3)
+	itemsInBatch := 0
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		
+		batchBuffer = append(batchBuffer, agencyPrefix...)
+		batchBuffer = append(batchBuffer, line...)
+		batchBuffer = append(batchBuffer, '\n')
+
+		itemsInBatch++
+		linesProcessed++
+
+		if itemsInBatch >= client.config.BatchSize {
+			if err := client.sendBatchBuffer(batchBuffer); err != nil {
+				return linesProcessed, err
+			}
+			batchBuffer = batchBuffer[:3]
+			itemsInBatch = 0
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		logger.Error(action, logger.Fail, "action", "scan-file", "err", err)
+		return linesProcessed, err
+	}
+
+	if itemsInBatch > 0 {
+		if err := client.sendBatchBuffer(batchBuffer); err != nil {
+			return linesProcessed, err
+		}
+	}
+	return linesProcessed, nil
+}
+
+func (client *Client) recvAndSaveWinners(action string) error {
+	header, err := safe_socket.RecvAll(client.conn, 3)
+	if err != nil {
+		logger.Error(action, logger.Fail, "action", "recv-winners-header")
+		return err
+	}
+
+	payloadLen := int(binary.BigEndian.Uint16(header[0:2]))
+
+	outFile, err := os.Create(client.config.OutputFile)
+	if err != nil {
+		logger.Error(action, logger.Fail, "action", "create-output-file", "file", client.config.OutputFile)
+		return err
+	}
+	defer outFile.Close()
+
+	if payloadLen == 0 {
+		return nil
+	}
+
+	buf := make([]byte, 4096)
+	bytesRemaining := payloadLen
+
+	for bytesRemaining > 0 {
+		toRead := len(buf)
+		if bytesRemaining < toRead {
+			toRead = bytesRemaining
+		}
+
+		chunk, err := safe_socket.RecvAll(client.conn, toRead)
+		if err != nil {
+			logger.Error(action, logger.Fail, "action", "recv-winners-chunk")
+			return err
+		}
+
+		if _, err := outFile.Write(chunk); err != nil {
+			logger.Error(action, logger.Fail, "action", "write-output-chunk")
+			return err
+		}
+
+		bytesRemaining -= len(chunk)
+	}
+
+	return nil
+}
+
+func (client *Client) Run() (err error) {
 	const action = "process-bets"
-	defer client.conn.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	defer func() {
+		if client.conn != nil {
+			client.conn.Close()
+		}
+		if ctx.Err() != nil {
+			logger.Info("graceful-shutdown", logger.Success, "agency-id", client.config.AgencyId)
+			err = nil 
+		}
+	}()
 
 	go func() {
 		<-ctx.Done()
@@ -112,116 +231,18 @@ func (client *Client) Run() error {
 
 	logger.Info(action, logger.InProgress, "agency-id", client.config.AgencyId)
 
-	inFile, err := os.Open(client.config.InputFile)
-	if err != nil {
-		if ctx.Err() != nil {
-			logger.Info("graceful-shutdown", logger.Success)
-			return nil
-		}
-		logger.Error(action, logger.Fail, "action", "open-input-file", "file", client.config.InputFile)
+	var linesProcessed int
+	if linesProcessed, err = client.sendBetFile(action); err != nil {
 		return err
 	}
-	defer inFile.Close()
-
-	scanner := bufio.NewScanner(inFile)
-	linesProcessed := 0
-	batch := make([][]byte, 0, client.config.BatchSize)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if len(line) == 0 {
-			continue
-		}
-		betData := client.config.AgencyId + "," + line
-		batch = append(batch, []byte(betData))
-
-		if len(batch)>=client.config.BatchSize{
-			if err := sendBatch(client.conn, batch); err != nil {
-				if ctx.Err() != nil {
-					logger.Info("graceful-shutdown", logger.Success)
-					return nil
-				}
-				return err
-			}
-			batch = make([][]byte, 0, client.config.BatchSize)
-		}
-		
-		linesProcessed++
-	}
-
-	if err := scanner.Err(); err != nil {
-		if ctx.Err() != nil {
-			logger.Info("graceful-shutdown", logger.Success)
-			return nil
-		}
-		logger.Error(action, logger.Fail, "action", "scan-file", "err", err)
-		return err
-	}
-
-	if err := sendBatch(client.conn, batch); err != nil {
-		if ctx.Err() != nil {
-			logger.Info("graceful-shutdown", logger.Success)
-			return nil
-		}
-        return err
-    }
-    batch = nil
 
 	endPacket := createPacket(MsgTypeEnd, []byte{})
-	if err := safe_socket.SendAll(client.conn, endPacket); err != nil {
-		if ctx.Err() != nil {
-			logger.Info("graceful-shutdown", logger.Success)
-			return nil
-		}
+	if err = safe_socket.SendAll(client.conn, endPacket); err != nil {
 		logger.Error(action, logger.Fail, "action", "send-end-bets")
 		return err
 	}
 
-	header, err := safe_socket.RecvAll(client.conn, 3)
-	if err != nil {
-		if ctx.Err() != nil {
-			logger.Info("graceful-shutdown", logger.Success)
-			return nil
-		}
-		logger.Error(action, logger.Fail, "action", "recv-winners-header")
-		return err
-	}
-
-	payloadLen := binary.BigEndian.Uint16(header[0:2])
-
-	var winnersPayload []byte
-
-	if payloadLen > 0 {
-		winnersPayload, err = safe_socket.RecvAll(client.conn, int(payloadLen))
-		if err != nil {
-			if ctx.Err() != nil {
-				logger.Info("graceful-shutdown", logger.Success)
-				return nil
-			}
-			logger.Error(action, logger.Fail, "action", "recv-winners-body")
-			return err
-		}
-	} else {
-		winnersPayload = []byte{}
-	}
-
-	outFile, err := os.Create(client.config.OutputFile)
-	if err != nil {
-		if ctx.Err() != nil {
-			logger.Info("graceful-shutdown", logger.Success)
-		    return nil
-		}
-		logger.Error(action, logger.Fail, "action", "create-output-file", "file", client.config.OutputFile)
-		return err
-	}
-	defer outFile.Close()
-
-	if _, err := outFile.Write(winnersPayload); err != nil {
-		if ctx.Err() != nil {
-			logger.Info("graceful-shutdown", logger.Success)
-			return nil
-		}
-		logger.Error(action, logger.Fail, "action", "write-output")
+	if err = client.recvAndSaveWinners(action); err != nil {
 		return err
 	}
 
