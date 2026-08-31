@@ -82,17 +82,19 @@ func createPacket(msgType byte, payload []byte) []byte {
 	return packet
 }
 
-func (client *Client) sendBatchBuffer(payload []byte) error {
-	if len(payload) == 0 {
-        return nil
-    }
+func (client *Client) sendBatchBuffer(batchBuffer []byte) error {
+	payloadLen := len(batchBuffer) - 3
+	if payloadLen <= 0 {
+		return nil
+	}
 
-	packet := createPacket(MsgTypeBet, payload)
+	binary.BigEndian.PutUint16(batchBuffer[0:2], uint16(payloadLen))
+	batchBuffer[2] = MsgTypeBet
 
-    if err := safe_socket.SendAll(client.conn, packet); err != nil {
-        logger.Error("process-bets", logger.Fail, "action", "send-bet-batch")
-        return err
-    }
+	if err := safe_socket.SendAll(client.conn, batchBuffer); err != nil {
+		logger.Error("process-bets", logger.Fail, "action", "send-bet-batch")
+		return err
+	}
 
 	ackHeader, err := safe_socket.RecvAll(client.conn, 1)
 	if err != nil {
@@ -119,7 +121,7 @@ func (client *Client) sendBetFile(action string) (int, error){
 	scanner := bufio.NewScanner(inFile)
 	linesProcessed := 0
 	agencyPrefix := []byte(client.config.AgencyId + ",")
-	var batchPayload []byte
+	batchBuffer := make([]byte, 3)
 	itemsInBatch := 0
 
 	for scanner.Scan() {
@@ -128,20 +130,20 @@ func (client *Client) sendBetFile(action string) (int, error){
 			continue
 		}
 		
-		batchPayload = append(batchPayload, agencyPrefix...)
-        batchPayload = append(batchPayload, line...)
-        batchPayload = append(batchPayload, '\n')
+		batchBuffer = append(batchBuffer, agencyPrefix...)
+		batchBuffer = append(batchBuffer, line...)
+		batchBuffer = append(batchBuffer, '\n')
 
 		itemsInBatch++
 		linesProcessed++
 
 		if itemsInBatch >= client.config.BatchSize {
-            if err := client.sendBatchBuffer(batchPayload); err != nil {
-                return linesProcessed, err
-            }
-            batchPayload = batchPayload[:0] 
-            itemsInBatch = 0
-        }
+			if err := client.sendBatchBuffer(batchBuffer); err != nil {
+				return linesProcessed, err
+			}
+			batchBuffer = batchBuffer[:3]
+			itemsInBatch = 0
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -150,10 +152,10 @@ func (client *Client) sendBetFile(action string) (int, error){
 	}
 
 	if itemsInBatch > 0 {
-        if err := client.sendBatchBuffer(batchPayload); err != nil {
-            return linesProcessed, err
-        }
-    }
+		if err := client.sendBatchBuffer(batchBuffer); err != nil {
+			return linesProcessed, err
+		}
+	}
 	return linesProcessed, nil
 }
 
