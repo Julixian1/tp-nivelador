@@ -7,10 +7,13 @@ import signal
 from lottery.lottery import Lottery
 from lottery.bet import Bet
 
-MSG_TYPE_BET = 1
-MSG_TYPE_END = 2
-MSG_TYPE_WINNERS = 3
-MSG_TYPE_ACK = 4
+from protocol.protocol import (
+    ClientProtocol,
+    MSG_TYPE_BET,
+    MSG_TYPE_END,
+    MSG_TYPE_WINNERS,
+    MSG_TYPE_ACK,
+)
 
 
 class Server:
@@ -48,48 +51,25 @@ class Server:
         action = "handle-client"
         message_amount = 0
         current_agency_id = None
+        protocol = ClientProtocol(client_socket)
         try:
             logger.info(action, logger.LogResult.in_progress)
             while self.running:
-                header = safe_socket.recv_all(client_socket, 3)
-                if not header:
+                msg_type, payload = protocol.receive_message()
+                if msg_type is None:
                     break
 
-                payload_len = int.from_bytes(header[0:2], byteorder="big")
-                msg_type = header[2]
-
-                payload = b""
-                if payload_len > 0:
-                    payload = safe_socket.recv_all(client_socket, payload_len)
-                    if payload is None:
-                        break
-
                 if msg_type == MSG_TYPE_BET:
-                    lines = payload.decode("utf-8").split("\n")
-                    bets_batch = []
-                    for line in lines:
-                        if not line.strip():
-                            continue
-                        parts = line.split(",")
-                        current_agency_id = int(parts[0])
-
-                        bet = Bet(
-                            agency_id=current_agency_id,
-                            first_name=parts[1],
-                            last_name=parts[2],
-                            document=int(parts[3]),
-                            birthdate=parts[4],
-                            number=int(parts[5]),
-                        )
-                        bets_batch.append(bet)
+                    agency_id, bets_batch = protocol.parse_bets_payload(payload)
+                    if agency_id is not None:
+                        current_agency_id = agency_id
 
                     if bets_batch:
                         with self.storage_lock:
                             self.lottery.store_bets(bets_batch)
                         message_amount += len(bets_batch)
 
-                    ack_packet = bytes([MSG_TYPE_ACK])
-                    safe_socket.send_all(client_socket, ack_packet)
+                    protocol.send_ack()
 
                 elif msg_type == MSG_TYPE_END:
                     logger.info("waiting-quorum", logger.LogResult.in_progress)
@@ -106,15 +86,7 @@ class Server:
                             winner_line = f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
                             winners.append(winner_line)
 
-                    winners_payload = "\n".join(winners).encode("utf-8")
-                    if len(winners) > 0:
-                        winners_payload += b"\n"
-
-                    resp_len = len(winners_payload).to_bytes(2, byteorder="big")
-                    resp_type = bytes([MSG_TYPE_WINNERS])
-                    response = resp_len + resp_type + winners_payload
-
-                    safe_socket.send_all(client_socket, response)
+                    protocol.send_winners(winners)
 
                     logger.info(
                         action,
@@ -132,7 +104,7 @@ class Server:
                 )
                 raise e
         finally:
-            client_socket.close()
+            protocol.close()
 
     def run(self):
         action = "accept-connection"
