@@ -83,8 +83,7 @@ class Server:
                     winners = []
                     for bet in self.lottery.load_bets():
                         if bet.agency_id == current_agency_id and self.lottery.has_won(bet):
-                            winner_line = f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
-                            winners.append(winner_line)
+                            winners.append(bet)
 
                     protocol.send_winners(winners)
 
