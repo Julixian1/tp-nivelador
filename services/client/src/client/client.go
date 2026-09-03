@@ -120,13 +120,14 @@ func (client *Client) sendBetFile(action string) (int, error){
 }
 
 func (client *Client) recvAndSaveWinners(action string) error {
-
 	outFile, err := os.Create(client.config.OutputFile)
 	if err != nil {
 		logger.Error(action, logger.Fail, "action", "create-output-file", "file", client.config.OutputFile)
 		return err
 	}
 	defer outFile.Close()
+
+	writer := bufio.NewWriter(outFile)
 
 	for {
 		payloadLen, err := protocol.ReadWinnersChunkHeader(client.conn)
@@ -139,23 +140,34 @@ func (client *Client) recvAndSaveWinners(action string) error {
             break
         }
 
-		bytesReadInChunk := 0
-		for bytesReadInChunk < payloadLen {
-			line, bytesRead, err := protocol.ReadWinnerFromSocket(client.conn)
-			if err != nil {
-				logger.Error(action, logger.Fail, "action", "read-winner-item")
-				return err
-			}
+		chunkPayload, err := protocol.ReadWinnersChunkPayload(client.conn, payloadLen)
+        if err != nil {
+            logger.Error(action, logger.Fail, "action", "recv-winners-chunk")
+            return err
+        }
 
-			if _, err := outFile.WriteString(line); err != nil {
-				logger.Error(action, logger.Fail, "action", "write-output-line")
-				return err
-			}
+		offset := 0
+		for offset < payloadLen {
+            line, newOffset, err := protocol.ParseWinnerFromBytes(chunkPayload, offset)
+            if err != nil {
+                logger.Error(action, logger.Fail, "action", "parse-winner-item")
+                return err
+            }
 
-			bytesReadInChunk += bytesRead
-		}
+            if _, err := writer.WriteString(line); err != nil {
+                logger.Error(action, logger.Fail, "action", "write-output-line")
+                return err
+            }
+
+            offset = newOffset
+        }
 
 	}
+
+	if err := writer.Flush(); err != nil {
+        logger.Error(action, logger.Fail, "action", "flush-output-file")
+        return err
+    }
 
 	return nil
 }

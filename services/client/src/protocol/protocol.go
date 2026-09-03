@@ -128,61 +128,41 @@ func ReadWinnersChunkHeader(r io.Reader) (int, error) {
 	return payloadLen, nil
 }
 
+func ParseWinnerFromBytes(data []byte, offset int) (string, int, error) {
+    if offset >= len(data) {
+        return "", 0, io.EOF
+    }
 
-func ReadWinnerFromSocket(r io.Reader) (string, int, error) {
-	bytesRead := 0
+    nombreLen := int(data[offset])
+    offset++
+    nombre := string(data[offset : offset+nombreLen])
+    offset += nombreLen
 
-	bufLen, err := safe_socket.RecvAll(r, 1)
-	if err != nil {
-		return "", 0, err
-	}
-	nombreLen := int(bufLen[0])
-	bytesRead += 1
+    apellidoLen := int(data[offset])
+    offset++
+    apellido := string(data[offset : offset+apellidoLen])
+    offset += apellidoLen
 
-	bufNombre, err := safe_socket.RecvAll(r, nombreLen)
-	if err != nil {
-		return "", 0, err
-	}
-	nombre := string(bufNombre)
-	bytesRead += nombreLen
+    documento := binary.BigEndian.Uint32(data[offset : offset+4])
+    offset += 4
 
-	bufLen, err = safe_socket.RecvAll(r, 1)
-	if err != nil {
-		return "", 0, err
-	}
-	apellidoLen := int(bufLen[0])
-	bytesRead += 1
+    anio := binary.BigEndian.Uint16(data[offset : offset+2])
+    offset += 2
 
-	bufApellido, err := safe_socket.RecvAll(r, apellidoLen)
-	if err != nil {
-		return "", 0, err
-	}
-	apellido := string(bufApellido)
-	bytesRead += apellidoLen
+    mes := data[offset]
+    offset++
 
-	bufDoc, err := safe_socket.RecvAll(r, 4)
-	if err != nil {
-		return "", 0, err
-	}
-	documento := binary.BigEndian.Uint32(bufDoc)
-	bytesRead += 4
+    dia := data[offset]
+    offset++
 
-	bufFecha, err := safe_socket.RecvAll(r, 4)
-	if err != nil {
-		return "", 0, err
-	}
-	anio := binary.BigEndian.Uint16(bufFecha[0:2])
-	mes := bufFecha[2]
-	dia := bufFecha[3]
-	bytesRead += 4
+    numero := binary.BigEndian.Uint16(data[offset : offset+2])
+    offset += 2
 
-	bufNum, err := safe_socket.RecvAll(r, 2)
-	if err != nil {
-		return "", 0, err
-	}
-	numero := binary.BigEndian.Uint16(bufNum)
-	bytesRead += 2
+    line := fmt.Sprintf("%s,%s,%d,%04d-%02d-%02d,%d\n", nombre, apellido, documento, anio, mes, dia, numero)
 
-	line := fmt.Sprintf("%s,%s,%d,%04d-%02d-%02d,%d\n", nombre, apellido, documento, anio, mes, dia, numero)
-	return line, bytesRead, nil
+    return line, offset, nil
+}
+
+func ReadWinnersChunkPayload(r io.Reader, length int) ([]byte, error) {
+    return safe_socket.RecvAll(r, length)
 }
